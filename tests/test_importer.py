@@ -49,9 +49,11 @@ class TestImporter(Basetest):
         self.assertEqual("Vol-3889/paper1", values["ceur_id"])
         self.assertEqual(3889, values["ceur_volume"])
         self.assertEqual("12-26", values["pages"])
+        self.assertEqual("paper1", values["paper_id"])
+        self.assertEqual("https://ceur-ws.org/Vol-3889/paper1", values["landing_page"])
         empty = Paper.of_spt(3889, "paper9", {})
         self.assertEqual("paper9", empty.title)
-        self.assertEqual({"ceur_id", "ceur_volume"}, set(empty.field_values()))
+        self.assertEqual({"ceur_id", "ceur_volume", "paper_id", "landing_page"}, set(empty.field_values()))
 
     def test_paper_names(self) -> None:
         """

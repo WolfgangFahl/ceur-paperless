@@ -57,6 +57,17 @@ class Paper:
         return f"Vol-{self.volume}/{self.name}"
 
     @property
+    def paper_id(self) -> str:
+        """
+        the id of the paper in its volume: the stem of the PDF name as in the ceur-spt mapping of semantify
+        """
+        return self.name
+
+    @property
+    def landing_page(self) -> str:
+        return f"https://ceur-ws.org/Vol-{self.volume}/{self.paper_id}"
+
+    @property
     def filename(self) -> str:
         return f"{self.name}.pdf"
 
@@ -70,6 +81,8 @@ class Paper:
             "authors": self.authors,
             "pages": self.pages,
             "pdf_url": self.pdf_url,
+            "paper_id": self.paper_id,
+            "landing_page": self.landing_page,
         }
         return {key: value for key, value in values.items() if value is not None}
 
@@ -113,6 +126,9 @@ class Importer:
         "authors": "longtext",
         "pages": "string",
         "pdf_url": "url",
+        # DOI relevant fields, see semantify issue 14
+        "paper_id": "string",
+        "landing_page": "url",
     }
 
     def __init__(

@@ -9,8 +9,11 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
+from ceursemantify.model import Paper as ModelPaper
+from ceursemantify.volume_html import VolumeHtml
 
 
 class VolumeRange:
@@ -45,7 +48,8 @@ class Paper:
     """
 
     volume: int
-    name: str
+    paper_id: str
+    filename: str
     title: Optional[str] = None
     created: Optional[str] = None
     authors: Optional[str] = None
@@ -54,22 +58,14 @@ class Paper:
 
     @property
     def ceur_id(self) -> str:
-        return f"Vol-{self.volume}/{self.name}"
-
-    @property
-    def paper_id(self) -> str:
-        """
-        the id of the paper in its volume: the stem of the PDF name as in the ceur-spt mapping of semantify
-        """
-        return self.name
+        return f"Vol-{self.volume}/{self.paper_id}"
 
     @property
     def landing_page(self) -> str:
-        return f"https://ceur-ws.org/Vol-{self.volume}/{self.paper_id}"
-
-    @property
-    def filename(self) -> str:
-        return f"{self.name}.pdf"
+        """
+        the landing page as in register-dois.py of semantify
+        """
+        return f"https://ceur-ws.org/Vol-{self.volume}/{self.paper_id}/"
 
     def field_values(self) -> Dict[str, object]:
         """
@@ -87,20 +83,33 @@ class Paper:
         return {key: value for key, value in values.items() if value is not None}
 
     @classmethod
-    def of_spt(cls, volume: int, name: str, meta: dict) -> "Paper":
+    def of_model(cls, volume: int, paper: ModelPaper, created: Optional[str] = None) -> "Paper":
         """
-        create a paper from the ceur-spt JSON of the paper
+        create a paper from a paper of the semantify research model
+
+        Args:
+            volume: the volume number
+            paper: the paper as mapped from the table of contents of the volume page
+            created: the publication date of the volume
         """
-        paper = cls(
+        authors = ", ".join(author.full_name() for author in paper.authors) or None
+        pages = None
+        if paper.pageStart:
+            pages = f"{paper.pageStart}-{paper.pageEnd}" if paper.pageEnd else paper.pageStart
+        path = urlparse(paper.pdfUrl).path
+        prefix = f"/Vol-{volume}/"
+        filename = path[path.index(prefix) + len(prefix) :] if prefix in path else os.path.basename(path)
+        model_paper = cls(
             volume=volume,
-            name=name,
-            title=meta.get("spt.title") or name,
-            created=(meta.get("spt.volume") or {}).get("date"),
-            authors=meta.get("cvb.authors"),
-            pages=meta.get("cvb.pages"),
-            pdf_url=meta.get("spt.pdfUrl"),
+            paper_id=paper.id,
+            filename=filename,
+            title=paper.title or paper.id,
+            created=created,
+            authors=authors,
+            pages=pages,
+            pdf_url=paper.pdfUrl,
         )
-        return paper
+        return model_paper
 
 
 @dataclass
@@ -112,6 +121,13 @@ class ImportReport:
     documents: int = 0
     uploaded: int = 0
     problems: List[str] = field(default_factory=list)
+
+    def problem(self, text: str) -> None:
+        """
+        record the given problem and show it right away
+        """
+        self.problems.append(text)
+        print(f"problem: {text}", flush=True)
 
 
 class Importer:
@@ -136,7 +152,6 @@ class Importer:
         paperless_url: str,
         token: str,
         mirror: str,
-        spt_url: str = "https://ceurspt.wikidata.dbis.rwth-aachen.de",
         viewer: Optional[str] = None,
         timeout: int = 120,
     ):
@@ -147,31 +162,17 @@ class Importer:
             paperless_url: base url of the Paperless-ngx instance
             token: API token
             mirror: local directory of the CEUR-WS mirror holding Vol-N directories
-            spt_url: base url of ceur-spt
             viewer: user name of a read only viewer that gets view permissions
             timeout: seconds to wait for the consumption of an upload
         """
         self.api = f"{paperless_url.rstrip('/')}/api"
         self.mirror = mirror
-        self.spt_url = spt_url.rstrip("/")
         self.viewer = viewer
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Token {token}"
         self.field_ids: Dict[str, int] = {}
         self.viewer_id: Optional[int] = None
-
-    @staticmethod
-    def paper_names(volume_dir: str) -> List[str]:
-        """
-        the names of the paper PDFs of a volume directory, sorted naturally
-        """
-        names = [f[:-4] for f in os.listdir(volume_dir) if f.lower().endswith(".pdf")]
-
-        def natural(name: str):
-            return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", name)]
-
-        return sorted(names, key=natural)
 
     def get_json(self, url: str) -> dict:
         response = self.session.get(url)
@@ -251,31 +252,35 @@ class Importer:
                     break
                 time.sleep(1)
         if doc_id is None:
-            report.problems.append(f"{paper.ceur_id} not consumed within {self.timeout} s")
+            report.problem(f"{paper.ceur_id} not consumed within {self.timeout} s")
             return None
         custom = [{"field": self.field_ids[key], "value": value} for key, value in paper.field_values().items()]
         response = self.session.patch(f"{self.api}/documents/{doc_id}/", json={"custom_fields": custom})
         if not response.ok:
-            report.problems.append(f"{paper.ceur_id} fields {response.status_code} {response.text[:200]}")
+            report.problem(f"{paper.ceur_id} fields {response.status_code} {response.text[:200]}")
         report.documents += 1
         return doc_id
 
     def import_volume(self, volume: int, report: ImportReport) -> None:
         """
-        import all paper PDFs of the given volume
+        import the papers of the given volume as the semantify mapping of its volume page defines them
         """
-        volume_dir = os.path.join(self.mirror, f"Vol-{volume}")
-        if not os.path.isdir(volume_dir):
-            report.problems.append(f"Vol-{volume} not in the mirror")
+        index_html = os.path.join(self.mirror, f"Vol-{volume}", "index.html")
+        if not os.path.isfile(index_html):
+            report.problem(f"Vol-{volume} not in the mirror")
             return
+        result = VolumeHtml.of_file(index_html).proceedings()
+        for issue in result.issues:
+            report.problem(f"Vol-{volume} {issue}")
+        proceedings = result.target
         tag_id = self.tag_id(f"Vol-{volume}")
         doc_ids = []
-        for name in self.paper_names(volume_dir):
-            response = self.session.get(f"{self.spt_url}/Vol-{volume}/{name}.json")
-            meta = response.json() if response.ok else {}
-            if not response.ok:
-                report.problems.append(f"Vol-{volume}/{name} ceur-spt {response.status_code}")
-            doc_id = self.import_paper(Paper.of_spt(volume, name, meta), tag_id, report)
+        for model_paper in proceedings.papers:
+            paper = Paper.of_model(volume, model_paper, proceedings.pubDate)
+            if not os.path.isfile(os.path.join(self.mirror, f"Vol-{volume}", paper.filename)):
+                report.problem(f"{paper.ceur_id} {paper.filename} not in the mirror")
+                continue
+            doc_id = self.import_paper(paper, tag_id, report)
             if doc_id is not None:
                 doc_ids.append(doc_id)
         if self.viewer_id is not None and doc_ids:
@@ -289,7 +294,7 @@ class Importer:
                 },
             )
             if not response.ok:
-                report.problems.append(f"Vol-{volume} permissions {response.status_code} {response.text[:200]}")
+                report.problem(f"Vol-{volume} permissions {response.status_code} {response.text[:200]}")
 
     def import_volumes(self, volumes: List[int], progress=None) -> ImportReport:
         """

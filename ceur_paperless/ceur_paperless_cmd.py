@@ -45,9 +45,6 @@ class CeurPaperlessCmd(BaseCmd):
         parser.add_argument("volumes", nargs="*", help="volume numbers and ranges, e.g. 3850-3899")
         parser.add_argument("--url", default="http://127.0.0.1:8000", help="base url of the Paperless-ngx instance")
         parser.add_argument("--mirror", help="local CEUR-WS mirror directory holding the Vol-N directories")
-        parser.add_argument(
-            "--spt", default="https://ceurspt.wikidata.dbis.rwth-aachen.de", help="base url of ceur-spt"
-        )
         parser.add_argument("--viewer", help="user name of a read only viewer that gets view permissions")
         parser.add_argument("--timeout", type=int, default=120, help="seconds to wait for each consumption")
 
@@ -58,9 +55,7 @@ class CeurPaperlessCmd(BaseCmd):
                 raise ValueError("--mirror is needed for an import")
             # the token is read from stdin so that it is neither in the process list nor in a file
             token = sys.stdin.readline().strip()
-            importer = Importer(
-                args.url, token, args.mirror, spt_url=args.spt, viewer=args.viewer, timeout=args.timeout
-            )
+            importer = Importer(args.url, token, args.mirror, viewer=args.viewer, timeout=args.timeout)
             volumes = VolumeRange.numbers(args.volumes)
 
             def progress(volume, report):
@@ -68,8 +63,7 @@ class CeurPaperlessCmd(BaseCmd):
 
             report = importer.import_volumes(volumes, progress=progress)
             print(f"{len(volumes)} volumes, {report.documents} documents, {report.uploaded} uploaded")
-            for problem in report.problems:
-                print(f"problem: {problem}")
+            print(f"{len(report.problems)} problems")
             handled = True
         return handled
 

@@ -21,6 +21,9 @@ dependencies = [
   # https://pypi.org/project/pybasemkit/
   # Python base module kit: YAML/JSON I/O, structured logging, CLI tooling
   "pybasemkit>=0.2.0",
+  # https://github.com/ceurws/semantify
+  # volume page to research model mapping: which table of contents entries are papers
+  "pyCEURsemantify @ git+https://github.com/ceurws/semantify.git@main",
   # https://pypi.org/project/requests/
   # Paperless-ngx REST API and ceur-spt
   "requests>=2.31.0",
@@ -61,3 +64,7 @@ only-include = ["ceur_paperless"]
 
 [tool.black]
 line-length = 120
+
+[tool.hatch.metadata]
+# pyCEURsemantify from git until a release with volume_html is on PyPI
+allow-direct-references = true

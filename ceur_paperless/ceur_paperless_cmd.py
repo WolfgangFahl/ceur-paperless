@@ -12,6 +12,7 @@ from typing import List, Optional
 from basemkit.base_cmd import BaseCmd
 
 import ceur_paperless
+from ceur_paperless.hops import EventLookup
 from ceur_paperless.importer import Importer, VolumeRange
 
 
@@ -47,6 +48,14 @@ class CeurPaperlessCmd(BaseCmd):
         parser.add_argument("--mirror", help="local CEUR-WS mirror directory holding the Vol-N directories")
         parser.add_argument("--viewer", help="user name of a read only viewer that gets view permissions")
         parser.add_argument("--timeout", type=int, default=120, help="seconds to wait for each consumption")
+        parser.add_argument(
+            "--hops",
+            action="store_true",
+            help="set Scholar, Event and EventSeries tags and the document types Paper and Front matter",
+        )
+        parser.add_argument(
+            "--no-wikidata", action="store_true", help="with --hops take the event from the volume page only"
+        )
 
     def handle_args(self, args: Namespace) -> bool:
         handled = super().handle_args(args)
@@ -55,7 +64,8 @@ class CeurPaperlessCmd(BaseCmd):
                 raise ValueError("--mirror is needed for an import")
             # the token is read from stdin so that it is neither in the process list nor in a file
             token = sys.stdin.readline().strip()
-            importer = Importer(args.url, token, args.mirror, viewer=args.viewer, timeout=args.timeout)
+            hops = EventLookup(use_wikidata=not args.no_wikidata) if args.hops else None
+            importer = Importer(args.url, token, args.mirror, viewer=args.viewer, timeout=args.timeout, hops=hops)
             volumes = VolumeRange.numbers(args.volumes)
 
             def progress(volume, report):

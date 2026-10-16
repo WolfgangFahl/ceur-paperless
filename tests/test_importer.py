@@ -7,6 +7,7 @@ Created on 2026-10-14
 from basemkit.basetest import Basetest
 from ceursemantify.volume_html import VolumeHtml
 
+from ceur_paperless.hops import EventLookup
 from ceur_paperless.importer import Importer, Paper, VolumeRange
 
 
@@ -62,6 +63,9 @@ class TestImporter(Basetest):
         self.assertEqual("https://ceur-ws.org/Vol-3889/paper1.pdf", values["pdf_url"])
         self.assertEqual("paper1", values["paper_id"])
         self.assertEqual("https://ceur-ws.org/Vol-3889/paper1/", values["landing_page"])
+        self.assertEqual("Front matter", preface.document_type)
+        self.assertEqual("Paper", paper.document_type)
+        self.assertEqual(["Wiem Baazouzi", "Marouen Kachroudi"], paper.author_names)
 
     def test_failing_volume(self) -> None:
         """
@@ -94,3 +98,18 @@ class TestImporter(Basetest):
         self.assertEqual(8, retry.connect)
         self.assertEqual(0, retry.read)
         self.assertEqual({502, 503, 504}, set(retry.status_forcelist))
+
+    def test_series_stem(self) -> None:
+        """
+        test the series part of event acronyms from volume pages
+        """
+        for acronym, expected in [
+            ("Wikidata 2022", "Wikidata"),
+            ("SemTab 2024", "SemTab"),
+            ("ISWC2022", "ISWC"),
+            ("SWAT4HCLS 2024", "SWAT4HCLS"),
+            ("KGCW'23", "KGCW"),
+            ("ESWC", "ESWC"),
+        ]:
+            with self.subTest(acronym=acronym):
+                self.assertEqual(expected, EventLookup.series_stem(acronym))

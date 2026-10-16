@@ -9,13 +9,16 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 from ceursemantify.model import Paper as ModelPaper
+from ceursemantify.model import Proceedings
+from ceursemantify.volume_html import VolumeHtml
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from ceursemantify.volume_html import VolumeHtml
+
+from ceur_paperless.hops import EventLookup
 
 
 class VolumeRange:
@@ -57,6 +60,14 @@ class Paper:
     authors: Optional[str] = None
     pages: Optional[str] = None
     pdf_url: Optional[str] = None
+    author_names: List[str] = field(default_factory=list)
+
+    @property
+    def document_type(self) -> str:
+        """
+        Paper for a table of contents entry with authors, Front matter for one without, e.g. the preface
+        """
+        return "Paper" if self.author_names else "Front matter"
 
     @property
     def ceur_id(self) -> str:
@@ -94,7 +105,8 @@ class Paper:
             paper: the paper as mapped from the table of contents of the volume page
             created: the publication date of the volume
         """
-        authors = ", ".join(author.full_name() for author in paper.authors) or None
+        author_names = [author.full_name() for author in paper.authors]
+        authors = ", ".join(author_names) or None
         pages = None
         if paper.pageStart:
             pages = f"{paper.pageStart}-{paper.pageEnd}" if paper.pageEnd else paper.pageStart
@@ -110,6 +122,7 @@ class Paper:
             authors=authors,
             pages=pages,
             pdf_url=paper.pdfUrl,
+            author_names=author_names,
         )
         return model_paper
 
@@ -157,6 +170,7 @@ class Importer:
         mirror: str,
         viewer: Optional[str] = None,
         timeout: int = 120,
+        hops: Optional[EventLookup] = None,
     ):
         """
         constructor
@@ -167,11 +181,14 @@ class Importer:
             mirror: local directory of the CEUR-WS mirror holding Vol-N directories
             viewer: user name of a read only viewer that gets view permissions
             timeout: seconds to wait for the consumption of an upload
+            hops: the event lookup when Scholar, Event, EventSeries tags and document types are to be set
         """
         self.api = f"{paperless_url.rstrip('/')}/api"
         self.mirror = mirror
         self.viewer = viewer
         self.timeout = timeout
+        self.hops = hops
+        self.document_type_ids: Dict[str, int] = {}
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Token {token}"
         # an API outage of up to about 4 minutes, e.g. a restart of the instance, does not fail a volume
@@ -220,15 +237,22 @@ class Importer:
         """
         return {"view": {"users": [self.viewer_id], "groups": []}, "change": {"users": [], "groups": []}}
 
-    def tag_id(self, name: str) -> int:
+    def tag_id(self, name: str, parent: Optional[int] = None) -> int:
         """
-        the id of the tag with the given name, created if missing, visible to the viewer
+        the id of the tag with the given name, created if missing, visible to the viewer;
+        with a parent the tag is put below it, a tag found under another parent is moved
         """
-        tags = self.get_json(f"{self.api}/tags/?name__iexact={name}")["results"]
+        tags = self.get_json(f"{self.api}/tags/?{urlencode({'name__iexact': name})}")["results"]
         if tags:
             tag_id = tags[0]["id"]
+            if parent is not None and tags[0].get("parent") != parent:
+                response = self.session.patch(f"{self.api}/tags/{tag_id}/", json={"parent": parent})
+                response.raise_for_status()
         else:
-            response = self.session.post(f"{self.api}/tags/", json={"name": name})
+            data = {"name": name}
+            if parent is not None:
+                data["parent"] = parent
+            response = self.session.post(f"{self.api}/tags/", json=data)
             response.raise_for_status()
             tag_id = response.json()["id"]
         if self.viewer_id is not None:
@@ -237,6 +261,52 @@ class Importer:
             )
             response.raise_for_status()
         return tag_id
+
+    def document_type_id(self, name: str) -> int:
+        """
+        the id of the document type with the given name, created if missing
+        """
+        if name not in self.document_type_ids:
+            types = self.get_json(f"{self.api}/document_types/?{urlencode({'name__iexact': name})}")["results"]
+            if types:
+                type_id = types[0]["id"]
+            else:
+                response = self.session.post(f"{self.api}/document_types/", json={"name": name})
+                response.raise_for_status()
+                type_id = response.json()["id"]
+            if self.viewer_id is not None:
+                response = self.session.patch(
+                    f"{self.api}/document_types/{type_id}/", json={"set_permissions": self.view_permissions()}
+                )
+                response.raise_for_status()
+            self.document_type_ids[name] = type_id
+        return self.document_type_ids[name]
+
+    def volume_parent(self, volume: int, proceedings: Proceedings, report: ImportReport) -> Optional[int]:
+        """
+        the event tag the volume tag belongs below, itself below its series tag below the root EventSeries;
+        None if no event is known for the volume
+        """
+        node = self.hops.lookup(volume, proceedings)
+        if node is None:
+            report.problem(f"Vol-{volume} no event on Wikidata or on the volume page")
+            return None
+        root = self.tag_id("EventSeries")
+        series = self.tag_id(node.series, root)
+        event = self.tag_id(node.event, series)
+        print(
+            f"Vol-{volume} event {node.event} {node.event_qid or ''} series {node.series} {node.series_qid or ''} from {node.source}",
+            flush=True,
+        )
+        return event
+
+    def paper_tags(self, paper: Paper, volume_tag: int) -> List[int]:
+        """
+        the volume tag and one tag per author below the root Scholar
+        """
+        root = self.tag_id("Scholar")
+        tags = [volume_tag] + [self.tag_id(name, root) for name in paper.author_names]
+        return tags
 
     def find_document(self, tag_id: int, filename: str) -> Optional[int]:
         """
@@ -275,7 +345,12 @@ class Importer:
             report.problem(f"{paper.ceur_id} not consumed within {self.timeout} s")
             return None
         custom = [{"field": self.field_ids[key], "value": value} for key, value in paper.field_values().items()]
-        response = self.session.patch(f"{self.api}/documents/{doc_id}/", json={"custom_fields": custom})
+        data = {"custom_fields": custom}
+        if self.hops:
+            # the serializer adds the ancestors of each tag: Scholar, the event, its series and EventSeries
+            data["tags"] = self.paper_tags(paper, tag_id)
+            data["document_type"] = self.document_type_id(paper.document_type)
+        response = self.session.patch(f"{self.api}/documents/{doc_id}/", json=data)
         if not response.ok:
             report.problem(f"{paper.ceur_id} fields {response.status_code} {response.text[:200]}")
         report.documents += 1
@@ -293,7 +368,8 @@ class Importer:
         for issue in result.issues:
             report.problem(f"Vol-{volume} {issue}")
         proceedings = result.target
-        tag_id = self.tag_id(f"Vol-{volume}")
+        parent = self.volume_parent(volume, proceedings, report) if self.hops else None
+        tag_id = self.tag_id(f"Vol-{volume}", parent)
         doc_ids = []
         for model_paper in proceedings.papers:
             paper = Paper.of_model(volume, model_paper, proceedings.pubDate)

@@ -282,15 +282,15 @@ class Importer:
             self.document_type_ids[name] = type_id
         return self.document_type_ids[name]
 
-    def volume_parent(self, volume: int, proceedings: Proceedings, report: ImportReport) -> Optional[int]:
+    def volume_ancestors(self, volume: int, proceedings: Proceedings, report: ImportReport) -> List[int]:
         """
-        the event tag the volume tag belongs below, itself below its series tag below the root EventSeries;
-        None if no event is known for the volume
+        the tags above the volume tag: the root EventSeries, the series and the event, the event last;
+        empty if no event is known for the volume
         """
         node = self.hops.lookup(volume, proceedings)
         if node is None:
             report.problem(f"Vol-{volume} no event on Wikidata or on the volume page")
-            return None
+            return []
         root = self.tag_id("EventSeries")
         series = self.tag_id(node.series, root)
         event = self.tag_id(node.event, series)
@@ -298,14 +298,16 @@ class Importer:
             f"Vol-{volume} event {node.event} {node.event_qid or ''} series {node.series} {node.series_qid or ''} from {node.source}",
             flush=True,
         )
-        return event
+        return [root, series, event]
 
-    def paper_tags(self, paper: Paper, volume_tag: int) -> List[int]:
+    def paper_tags(self, paper: Paper, volume_tags: List[int]) -> List[int]:
         """
-        the volume tag and one tag per author below the root Scholar
+        the volume tag with its ancestors, the root Scholar and one tag per author below it;
+        the ancestors are sent along since Paperless-ngx takes an ancestor missing in a PATCH
+        as a removed parent and drops its descendants with it
         """
         root = self.tag_id("Scholar")
-        tags = [volume_tag] + [self.tag_id(name, root) for name in paper.author_names]
+        tags = volume_tags + [root] + [self.tag_id(name, root) for name in paper.author_names]
         return tags
 
     def find_document(self, tag_id: int, filename: str) -> Optional[int]:
@@ -320,7 +322,9 @@ class Importer:
                 return doc["id"]
         return None
 
-    def import_paper(self, paper: Paper, tag_id: int, report: ImportReport) -> Optional[int]:
+    def import_paper(
+        self, paper: Paper, tag_id: int, report: ImportReport, volume_tags: Optional[List[int]] = None
+    ) -> Optional[int]:
         """
         upload the paper if it is not there yet and set its fields
         """
@@ -348,7 +352,7 @@ class Importer:
         data = {"custom_fields": custom}
         if self.hops:
             # the serializer adds the ancestors of each tag: Scholar, the event, its series and EventSeries
-            data["tags"] = self.paper_tags(paper, tag_id)
+            data["tags"] = self.paper_tags(paper, volume_tags or [tag_id])
             data["document_type"] = self.document_type_id(paper.document_type)
         response = self.session.patch(f"{self.api}/documents/{doc_id}/", json=data)
         if not response.ok:
@@ -368,15 +372,16 @@ class Importer:
         for issue in result.issues:
             report.problem(f"Vol-{volume} {issue}")
         proceedings = result.target
-        parent = self.volume_parent(volume, proceedings, report) if self.hops else None
-        tag_id = self.tag_id(f"Vol-{volume}", parent)
+        ancestors = self.volume_ancestors(volume, proceedings, report) if self.hops else []
+        tag_id = self.tag_id(f"Vol-{volume}", ancestors[-1] if ancestors else None)
+        volume_tags = [tag_id] + ancestors
         doc_ids = []
         for model_paper in proceedings.papers:
             paper = Paper.of_model(volume, model_paper, proceedings.pubDate)
             if not os.path.isfile(os.path.join(self.mirror, f"Vol-{volume}", paper.filename)):
                 report.problem(f"{paper.ceur_id} {paper.filename} not in the mirror")
                 continue
-            doc_id = self.import_paper(paper, tag_id, report)
+            doc_id = self.import_paper(paper, tag_id, report, volume_tags)
             if doc_id is not None:
                 doc_ids.append(doc_id)
         if self.viewer_id is not None and doc_ids:

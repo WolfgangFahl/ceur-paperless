@@ -64,6 +64,9 @@ class CeurPaperlessCmd(BaseCmd):
             report = importer.import_volumes(volumes, progress=progress)
             print(f"{len(volumes)} volumes, {report.documents} documents, {report.uploaded} uploaded")
             print(f"{len(report.problems)} problems")
+            if report.failed:
+                print(f"{len(report.failed)} failed volumes: {' '.join(str(volume) for volume in report.failed)}")
+                self.exit_code = 1
             handled = True
         return handled
 

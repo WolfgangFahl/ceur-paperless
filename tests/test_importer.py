@@ -62,3 +62,35 @@ class TestImporter(Basetest):
         self.assertEqual("https://ceur-ws.org/Vol-3889/paper1.pdf", values["pdf_url"])
         self.assertEqual("paper1", values["paper_id"])
         self.assertEqual("https://ceur-ws.org/Vol-3889/paper1/", values["landing_page"])
+
+    def test_failing_volume(self) -> None:
+        """
+        test that a volume that raises does not end the range, see issue 3
+        """
+
+        class RaisingImporter(Importer):
+            def prepare(self) -> None:
+                pass
+
+            def import_volume(self, volume, report) -> None:
+                if volume == 2:
+                    raise UnicodeDecodeError("utf-8", b"\xb8", 0, 1, "invalid start byte")
+                report.documents += 1
+
+        importer = RaisingImporter("http://127.0.0.1:1", "no token", "/nonexistent")
+        done = []
+        report = importer.import_volumes([1, 2, 3], progress=lambda volume, report: done.append(volume))
+        self.assertEqual([1, 2, 3], done)
+        self.assertEqual(2, report.documents)
+        self.assertEqual([2], report.failed)
+        self.assertIn("Vol-2 failed: UnicodeDecodeError", report.problems[0])
+
+    def test_retry(self) -> None:
+        """
+        test that connection errors and gateway errors of the API are retried with backoff, see issue 3
+        """
+        importer = Importer("http://127.0.0.1:8000", "no token", "/nonexistent")
+        retry = importer.session.get_adapter("http://127.0.0.1:8000/api/").max_retries
+        self.assertEqual(8, retry.connect)
+        self.assertEqual(0, retry.read)
+        self.assertEqual({502, 503, 504}, set(retry.status_forcelist))

@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import requests
 from ceursemantify.model import Paper as ModelPaper
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from ceursemantify.volume_html import VolumeHtml
 
 
@@ -121,6 +123,7 @@ class ImportReport:
     documents: int = 0
     uploaded: int = 0
     problems: List[str] = field(default_factory=list)
+    failed: List[int] = field(default_factory=list)
 
     def problem(self, text: str) -> None:
         """
@@ -171,6 +174,21 @@ class Importer:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Token {token}"
+        # an API outage of up to about 4 minutes, e.g. a restart of the instance, does not fail a volume
+        # read errors are not retried since a repeated POST could upload twice
+        retry = Retry(
+            total=8,
+            connect=8,
+            read=0,
+            status=8,
+            backoff_factor=2,
+            backoff_max=60,
+            status_forcelist=[502, 503, 504],
+            allowed_methods=None,
+            raise_on_status=False,
+        )
+        self.session.mount("http://", HTTPAdapter(max_retries=retry))
+        self.session.mount("https://", HTTPAdapter(max_retries=retry))
         self.field_ids: Dict[str, int] = {}
         self.viewer_id: Optional[int] = None
 
@@ -224,7 +242,9 @@ class Importer:
         """
         the id of the document with the given tag and original file name or None
         """
-        docs = self.get_json(f"{self.api}/documents/?tags__id__all={tag_id}&page_size=1000&fields=id,original_file_name")
+        docs = self.get_json(
+            f"{self.api}/documents/?tags__id__all={tag_id}&page_size=1000&fields=id,original_file_name"
+        )
         for doc in docs["results"]:
             if doc.get("original_file_name") == filename:
                 return doc["id"]
@@ -303,7 +323,12 @@ class Importer:
         self.prepare()
         report = ImportReport()
         for volume in volumes:
-            self.import_volume(volume, report)
+            # one failing volume does not end the range, see issue 3
+            try:
+                self.import_volume(volume, report)
+            except Exception as ex:
+                report.failed.append(volume)
+                report.problem(f"Vol-{volume} failed: {type(ex).__name__}: {ex}")
             if progress:
                 progress(volume, report)
         return report

@@ -208,11 +208,37 @@ class Importer:
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
         self.field_ids: Dict[str, int] = {}
         self.viewer_id: Optional[int] = None
+        # a failed create is looked up and retried, see issue 4
+        self.create_attempts = 5
+        self.create_backoff = 2
 
     def get_json(self, url: str) -> dict:
         response = self.session.get(url)
         response.raise_for_status()
         return response.json()
+
+    def find_named(self, endpoint: str, name: str) -> Optional[dict]:
+        """
+        the object of the given endpoint with the given name or None
+        """
+        results = self.get_json(f"{self.api}/{endpoint}/?{urlencode({'name__iexact': name})}")["results"]
+        return results[0] if results else None
+
+    def create_named(self, endpoint: str, data: dict) -> dict:
+        """
+        create the named object; after a failed POST the name is looked up since a concurrent importer
+        may have created it, otherwise the POST is retried with backoff, see issue 4
+        """
+        for attempt in range(self.create_attempts):
+            response = self.session.post(f"{self.api}/{endpoint}/", json=data)
+            if response.ok:
+                return response.json()
+            found = self.find_named(endpoint, data["name"])
+            if found:
+                return found
+            if attempt < self.create_attempts - 1:
+                time.sleep(self.create_backoff * 2**attempt)
+        response.raise_for_status()
 
     def prepare(self) -> None:
         """
@@ -221,9 +247,7 @@ class Importer:
         existing = {f["name"]: f["id"] for f in self.get_json(f"{self.api}/custom_fields/?page_size=100")["results"]}
         for name, data_type in self.FIELDS.items():
             if name not in existing:
-                response = self.session.post(f"{self.api}/custom_fields/", json={"name": name, "data_type": data_type})
-                response.raise_for_status()
-                existing[name] = response.json()["id"]
+                existing[name] = self.create_named("custom_fields", {"name": name, "data_type": data_type})["id"]
         self.field_ids = existing
         if self.viewer:
             users = self.get_json(f"{self.api}/users/?username__iexact={self.viewer}")["results"]
@@ -242,19 +266,17 @@ class Importer:
         the id of the tag with the given name, created if missing, visible to the viewer;
         with a parent the tag is put below it, a tag found under another parent is moved
         """
-        tags = self.get_json(f"{self.api}/tags/?{urlencode({'name__iexact': name})}")["results"]
-        if tags:
-            tag_id = tags[0]["id"]
-            if parent is not None and tags[0].get("parent") != parent:
+        tag = self.find_named("tags", name)
+        if tag:
+            tag_id = tag["id"]
+            if parent is not None and tag.get("parent") != parent:
                 response = self.session.patch(f"{self.api}/tags/{tag_id}/", json={"parent": parent})
                 response.raise_for_status()
         else:
             data = {"name": name}
             if parent is not None:
                 data["parent"] = parent
-            response = self.session.post(f"{self.api}/tags/", json=data)
-            response.raise_for_status()
-            tag_id = response.json()["id"]
+            tag_id = self.create_named("tags", data)["id"]
         if self.viewer_id is not None:
             response = self.session.patch(
                 f"{self.api}/tags/{tag_id}/", json={"set_permissions": self.view_permissions()}
@@ -267,13 +289,8 @@ class Importer:
         the id of the document type with the given name, created if missing
         """
         if name not in self.document_type_ids:
-            types = self.get_json(f"{self.api}/document_types/?{urlencode({'name__iexact': name})}")["results"]
-            if types:
-                type_id = types[0]["id"]
-            else:
-                response = self.session.post(f"{self.api}/document_types/", json={"name": name})
-                response.raise_for_status()
-                type_id = response.json()["id"]
+            found = self.find_named("document_types", name)
+            type_id = found["id"] if found else self.create_named("document_types", {"name": name})["id"]
             if self.viewer_id is not None:
                 response = self.session.patch(
                     f"{self.api}/document_types/{type_id}/", json={"set_permissions": self.view_permissions()}

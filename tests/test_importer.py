@@ -4,6 +4,7 @@ Created on 2026-10-14
 @author: wf
 """
 
+import requests
 from basemkit.basetest import Basetest
 from ceursemantify.volume_html import VolumeHtml
 
@@ -98,6 +99,67 @@ class TestImporter(Basetest):
         self.assertEqual(8, retry.connect)
         self.assertEqual(0, retry.read)
         self.assertEqual({502, 503, 504}, set(retry.status_forcelist))
+
+    def fake_importer(self, posts, found_after: int = None):
+        """
+        an importer with a fake session: the POSTs answer with the given status codes in turn,
+        the name lookup finds the object once found_after POSTs have been sent
+        """
+
+        class FakeResponse:
+            def __init__(self, status: int, data: dict):
+                self.status_code = status
+                self.ok = status < 400
+                self.text = str(data)
+                self._data = data
+
+            def json(self):
+                return self._data
+
+            def raise_for_status(self):
+                if not self.ok:
+                    raise requests.HTTPError(f"{self.status_code} Server Error")
+
+        class FakeSession:
+            def __init__(self):
+                self.headers = {}
+                self.post_count = 0
+
+            def get(self, url):
+                found = found_after is not None and self.post_count >= found_after
+                return FakeResponse(200, {"results": [{"id": 7, "name": "Vol-1"}] if found else []})
+
+            def post(self, url, json=None, **kwargs):
+                status = posts[min(self.post_count, len(posts) - 1)]
+                self.post_count += 1
+                return FakeResponse(status, {"id": 42, "name": json["name"]})
+
+            def patch(self, url, json=None):
+                return FakeResponse(200, {})
+
+        importer = Importer("http://127.0.0.1:1", "no token", "/nonexistent")
+        importer.session = FakeSession()
+        importer.create_backoff = 0
+        return importer
+
+    def test_create_after_failed_post(self) -> None:
+        """
+        test that a failed create is followed by a lookup and retried with backoff:
+        a concurrent creator, issue 4, or a transient server error do not fail the volume
+        """
+        # the object was created by a concurrent importer: the lookup after the failed POST finds it
+        importer = self.fake_importer([400], found_after=1)
+        self.assertEqual(7, importer.tag_id("Vol-1"))
+        self.assertEqual(1, importer.session.post_count)
+        # a transient 500: the second POST succeeds
+        importer = self.fake_importer([500, 201])
+        self.assertEqual(42, importer.tag_id("Vol-1"))
+        self.assertEqual(42, importer.document_type_id("Paper"))
+        # a persistent 500 fails after the given number of attempts
+        importer = self.fake_importer([500])
+        with self.assertRaises(requests.HTTPError):
+            importer.tag_id("Vol-1")
+        self.assertEqual(importer.create_attempts, importer.session.post_count)
 
     def test_series_stem(self) -> None:
         """

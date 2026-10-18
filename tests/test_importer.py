@@ -85,6 +85,80 @@ class TestImporter(Basetest):
         self.assertEqual("001 Abachi Productivity.pdf", paper.filename)
         self.assertIn("%20", paper.pdf_url)
 
+    def test_plausible_created(self) -> None:
+        """
+        test that a publication date outside the CEUR-WS range is not sent as created date, see issue 6:
+        a year the search index can not hold fails the consumption, a year in the future dates the documents wrongly
+        """
+        for value, expected in [
+            ("2014-11-22", "2014-11-22"),
+            ("1995-01-01", "1995-01-01"),
+            ("3014-11-22", None),
+            ("1021-12-23", None),
+            ("2104-10-15", None),
+            ("28-Nov-2012", None),
+            (None, None),
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(expected, Paper.plausible_date(value))
+
+    def test_upload_title(self) -> None:
+        """
+        test that a title with template braces is sent as raw block, see issue 6:
+        Paperless-ngx renders the title override as template, {{citation needed}} gives no title at all
+        """
+        title = "{{citation needed}}: Filling in Wikipedia's Citation Shaped Holes"
+        paper = Paper(volume=1143, paper_id="paper6", filename="paper6.pdf", title=title)
+        self.assertEqual("{% raw %}" + title + "{% endraw %}", paper.upload_title)
+        plain = Paper(volume=1143, paper_id="paper5", filename="paper5.pdf", title="On the Connection")
+        self.assertEqual("On the Connection", plain.upload_title)
+        try:
+            from jinja2.sandbox import SandboxedEnvironment
+        except ImportError:
+            self.skipTest("jinja2 not installed")
+        self.assertEqual(title, SandboxedEnvironment().from_string(paper.upload_title).render())
+
+    def test_published_elsewhere(self) -> None:
+        """
+        test that an entry linking the pdf of another volume is recognized, see issue 6 and semantify issue 35
+        """
+        html = """<html><body>
+<span class="CEURVOLNR">Vol-3733</span><span class="CEURPUBDATE">2024-07-21</span>
+<div class="CEURTOC"><ul>
+<li id="paper1"><a href="paper1.pdf"><span class="CEURTITLE">Own paper</span></a></li>
+<li id="published4"><a href="https://ceur-ws.org/Vol-3464/paper1.pdf"><span class="CEURTITLE">Elsewhere</span></a></li>
+</ul></div></body></html>"""
+        proceedings = VolumeHtml(html).proceedings().target
+        own, elsewhere = [Paper.of_model(3733, paper, proceedings.pubDate) for paper in proceedings.papers]
+        self.assertFalse(own.published_elsewhere)
+        self.assertTrue(elsewhere.published_elsewhere)
+
+    def test_find_document_by_base_name(self) -> None:
+        """
+        test that a paper in a subdirectory is found by the base name Paperless-ngx keeps, see issue 6
+        """
+        importer = Importer("http://127.0.0.1:1", "no token", "/nonexistent")
+        importer.get_json = lambda url: {"results": [{"id": 30932, "original_file_name": "DLT_2023_paper_19.pdf"}]}
+        self.assertEqual(30932, importer.find_document(1540, "papers/DLT_2023_paper_19.pdf"))
+        self.assertIsNone(importer.find_document(1540, "papers/DLT_2023_paper_18.pdf"))
+
+    def test_not_consumed_fails_volume(self) -> None:
+        """
+        test that a paper not consumed within the timeout puts its volume in the failed list, see issue 6
+        """
+
+        class NotConsumingImporter(Importer):
+            def prepare(self) -> None:
+                pass
+
+            def import_volume(self, volume, report) -> None:
+                report.not_consumed(volume, f"Vol-{volume}/paper1")
+
+        importer = NotConsumingImporter("http://127.0.0.1:1", "no token", "/nonexistent")
+        report = importer.import_volumes([1299, 1300])
+        self.assertEqual([1299, 1300], report.failed)
+        self.assertIn("Vol-1299/paper1 not consumed", report.problems[0])
+
     def test_source_path(self) -> None:
         """
         test that a paper without a pdf in the mirror is taken from the directory

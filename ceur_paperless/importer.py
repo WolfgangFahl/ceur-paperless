@@ -4,6 +4,7 @@ Created on 2026-10-14
 @author: wf
 """
 
+import datetime
 import os
 import re
 import time
@@ -74,6 +75,42 @@ class Paper:
         return f"Vol-{self.volume}/{self.paper_id}"
 
     @property
+    def upload_title(self) -> Optional[str]:
+        """
+        the title as sent to Paperless-ngx, which renders the title override as template:
+        a title with template braces, e.g. {{citation needed}}, is sent as raw block, see issue 6
+        """
+        title = self.title
+        if title and any(mark in title for mark in ("{{", "{%", "{#")):
+            title = "{% raw %}" + title + "{% endraw %}"
+        return title
+
+    @property
+    def published_elsewhere(self) -> bool:
+        """
+        True if the pdf url points to another volume, an entry of a paper published elsewhere,
+        see issue 6 and semantify issue 35
+        """
+        match = re.search(r"/Vol-(\d+)/", unquote(urlparse(self.pdf_url).path)) if self.pdf_url else None
+        return match is not None and int(match.group(1)) != self.volume
+
+    @staticmethod
+    def plausible_date(value: Optional[str]) -> Optional[str]:
+        """
+        the given ISO date if it lies between the first CEUR-WS volume and the current year, else None;
+        an impossible CEURPUBDATE, e.g. 3014-11-22, fails the consumption in the search index, see issue 6
+        """
+        plausible = None
+        if value:
+            try:
+                year = datetime.date.fromisoformat(value).year
+                if 1995 <= year <= datetime.date.today().year:
+                    plausible = value
+            except ValueError:
+                pass
+        return plausible
+
+    @property
     def landing_page(self) -> str:
         """
         the landing page as in register-dois.py of semantify
@@ -119,7 +156,7 @@ class Paper:
             paper_id=paper.id,
             filename=filename,
             title=paper.title or paper.id,
-            created=created,
+            created=cls.plausible_date(created),
             authors=authors,
             pages=pages,
             pdf_url=paper.pdfUrl,
@@ -145,6 +182,15 @@ class ImportReport:
         """
         self.problems.append(text)
         print(f"problem: {text}", flush=True)
+
+    def not_consumed(self, volume: int, ceur_id: str, timeout: int = 120) -> None:
+        """
+        record a paper not consumed within the timeout; the consumption may have failed,
+        so its volume counts as failed and ends up in the failed list, see issue 6
+        """
+        self.problem(f"{ceur_id} not consumed within {timeout} s")
+        if volume not in self.failed:
+            self.failed.append(volume)
 
 
 class Importer:
@@ -333,13 +379,16 @@ class Importer:
 
     def find_document(self, tag_id: int, filename: str) -> Optional[int]:
         """
-        the id of the document with the given tag and original file name or None
+        the id of the document with the given tag and original file name or None;
+        Paperless-ngx keeps the base name, so a paper in a subdirectory, e.g. papers/paper_1.pdf,
+        is compared by its base name, see issue 6
         """
         docs = self.get_json(
             f"{self.api}/documents/?tags__id__all={tag_id}&page_size=1000&fields=id,original_file_name"
         )
+        base_name = os.path.basename(filename)
         for doc in docs["results"]:
-            if doc.get("original_file_name") == filename:
+            if doc.get("original_file_name") == base_name:
                 return doc["id"]
         return None
 
@@ -366,7 +415,7 @@ class Importer:
         doc_id = self.find_document(tag_id, paper.filename)
         if doc_id is None:
             path = self.source_path(paper)
-            data = {"title": paper.title, "tags": tag_id}
+            data = {"title": paper.upload_title, "tags": tag_id}
             if paper.created:
                 data["created"] = paper.created
             with open(path, "rb") as pdf:
@@ -381,7 +430,7 @@ class Importer:
                     break
                 time.sleep(1)
         if doc_id is None:
-            report.problem(f"{paper.ceur_id} not consumed within {self.timeout} s")
+            report.not_consumed(paper.volume, paper.ceur_id, self.timeout)
             return None
         custom = [{"field": self.field_ids[key], "value": value} for key, value in paper.field_values().items()]
         data = {"custom_fields": custom}
@@ -407,12 +456,17 @@ class Importer:
         for issue in result.issues:
             report.problem(f"Vol-{volume} {issue}")
         proceedings = result.target
+        if proceedings.pubDate and Paper.plausible_date(proceedings.pubDate) is None:
+            report.problem(f"Vol-{volume} CEURPUBDATE {proceedings.pubDate} implausible, created left out")
         ancestors = self.volume_ancestors(volume, proceedings, report) if self.hops else []
         tag_id = self.tag_id(f"Vol-{volume}", ancestors[-1] if ancestors else None)
         volume_tags = [tag_id] + ancestors
         doc_ids = []
         for model_paper in proceedings.papers:
             paper = Paper.of_model(volume, model_paper, proceedings.pubDate)
+            if paper.published_elsewhere:
+                report.problem(f"{paper.ceur_id} published elsewhere {paper.pdf_url}, skipped")
+                continue
             if self.source_path(paper) is None:
                 report.problem(f"{paper.ceur_id} {paper.filename} not in the mirror nor converted")
                 continue

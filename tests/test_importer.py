@@ -71,6 +71,20 @@ class TestImporter(Basetest):
         self.assertEqual("Paper", paper.document_type)
         self.assertEqual(["Wiem Baazouzi", "Marouen Kachroudi"], paper.author_names)
 
+    def test_url_encoded_filename(self) -> None:
+        """
+        test that a pdf linked with a url encoded name gives the file name of the mirror, see issue 5
+        """
+        html = """<html><body>
+<span class="CEURVOLNR">Vol-72</span><span class="CEURPUBDATE">2003-01-01</span>
+<div class="CEURTOC"><ul>
+<li id="paper1"><a href="001%20Abachi%20Productivity.pdf"><span class="CEURTITLE">Productivity</span></a></li>
+</ul></div></body></html>"""
+        proceedings = VolumeHtml(html).proceedings().target
+        paper = Paper.of_model(72, proceedings.papers[0], proceedings.pubDate)
+        self.assertEqual("001 Abachi Productivity.pdf", paper.filename)
+        self.assertIn("%20", paper.pdf_url)
+
     def test_source_path(self) -> None:
         """
         test that a paper without a pdf in the mirror is taken from the directory

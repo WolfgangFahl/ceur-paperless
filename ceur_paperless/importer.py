@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 import requests
 from ceursemantify.model import Paper as ModelPaper
@@ -110,7 +110,8 @@ class Paper:
         pages = None
         if paper.pageStart:
             pages = f"{paper.pageStart}-{paper.pageEnd}" if paper.pageEnd else paper.pageStart
-        path = urlparse(paper.pdfUrl).path
+        # the mirror holds the decoded name, e.g. a space for %20, see issue 5
+        path = unquote(urlparse(paper.pdfUrl).path)
         prefix = f"/Vol-{volume}/"
         filename = path[path.index(prefix) + len(prefix) :] if prefix in path else os.path.basename(path)
         model_paper = cls(

@@ -46,6 +46,9 @@ class CeurPaperlessCmd(BaseCmd):
         parser.add_argument("volumes", nargs="*", help="volume numbers and ranges, e.g. 3850-3899")
         parser.add_argument("--url", default="http://127.0.0.1:8000", help="base url of the Paperless-ngx instance")
         parser.add_argument("--mirror", help="local CEUR-WS mirror directory holding the Vol-N directories")
+        parser.add_argument(
+            "--converted", help="directory with Vol-N directories of the PDFs converted from PostScript only papers"
+        )
         parser.add_argument("--viewer", help="user name of a read only viewer that gets view permissions")
         parser.add_argument("--timeout", type=int, default=120, help="seconds to wait for each consumption")
         parser.add_argument(
@@ -65,7 +68,15 @@ class CeurPaperlessCmd(BaseCmd):
             # the token is read from stdin so that it is neither in the process list nor in a file
             token = sys.stdin.readline().strip()
             hops = EventLookup(use_wikidata=not args.no_wikidata) if args.hops else None
-            importer = Importer(args.url, token, args.mirror, viewer=args.viewer, timeout=args.timeout, hops=hops)
+            importer = Importer(
+                args.url,
+                token,
+                args.mirror,
+                viewer=args.viewer,
+                timeout=args.timeout,
+                hops=hops,
+                converted=args.converted,
+            )
             volumes = VolumeRange.numbers(args.volumes)
 
             def progress(volume, report):

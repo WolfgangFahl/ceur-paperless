@@ -4,6 +4,9 @@ Created on 2026-10-14
 @author: wf
 """
 
+import os
+import tempfile
+
 import requests
 from basemkit.basetest import Basetest
 from ceursemantify.volume_html import VolumeHtml
@@ -67,6 +70,25 @@ class TestImporter(Basetest):
         self.assertEqual("Front matter", preface.document_type)
         self.assertEqual("Paper", paper.document_type)
         self.assertEqual(["Wiem Baazouzi", "Marouen Kachroudi"], paper.author_names)
+
+    def test_source_path(self) -> None:
+        """
+        test that a paper without a pdf in the mirror is taken from the directory
+        of the PDFs converted from PostScript, see semantify issue 39
+        """
+        with tempfile.TemporaryDirectory() as mirror, tempfile.TemporaryDirectory() as converted:
+            for base, name in [(mirror, "Vol-1/lenzerini.pdf"), (converted, "Vol-6/OP_000.pdf")]:
+                path = os.path.join(base, name)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "wb").close()
+            in_mirror = Paper(volume=1, paper_id="lenzerini", filename="lenzerini.pdf", title="t")
+            postscript = Paper(volume=6, paper_id="OP_000", filename="OP_000.pdf", title="t")
+            missing = Paper(volume=6, paper_id="OP_001", filename="OP_001.pdf", title="t")
+            importer = Importer("http://127.0.0.1:1", "no token", mirror, converted=converted)
+            self.assertEqual(os.path.join(mirror, "Vol-1", "lenzerini.pdf"), importer.source_path(in_mirror))
+            self.assertEqual(os.path.join(converted, "Vol-6", "OP_000.pdf"), importer.source_path(postscript))
+            self.assertIsNone(importer.source_path(missing))
+            self.assertIsNone(Importer("http://127.0.0.1:1", "no token", mirror).source_path(postscript))
 
     def test_failing_volume(self) -> None:
         """

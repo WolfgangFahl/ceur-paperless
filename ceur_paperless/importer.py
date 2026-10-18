@@ -171,6 +171,7 @@ class Importer:
         viewer: Optional[str] = None,
         timeout: int = 120,
         hops: Optional[EventLookup] = None,
+        converted: Optional[str] = None,
     ):
         """
         constructor
@@ -182,9 +183,11 @@ class Importer:
             viewer: user name of a read only viewer that gets view permissions
             timeout: seconds to wait for the consumption of an upload
             hops: the event lookup when Scholar, Event, EventSeries tags and document types are to be set
+            converted: directory with Vol-N directories of the PDFs converted from PostScript only papers
         """
         self.api = f"{paperless_url.rstrip('/')}/api"
         self.mirror = mirror
+        self.converted = converted
         self.viewer = viewer
         self.timeout = timeout
         self.hops = hops
@@ -339,6 +342,20 @@ class Importer:
                 return doc["id"]
         return None
 
+    def source_path(self, paper: Paper) -> Optional[str]:
+        """
+        the path of the pdf of the paper: the mirror, else the converted PDFs
+        of the PostScript only papers, see semantify issue 39; None if there is none
+        """
+        path = None
+        bases = [self.mirror] + ([self.converted] if self.converted else [])
+        for base in bases:
+            candidate = os.path.join(base, f"Vol-{paper.volume}", paper.filename)
+            if os.path.isfile(candidate):
+                path = candidate
+                break
+        return path
+
     def import_paper(
         self, paper: Paper, tag_id: int, report: ImportReport, volume_tags: Optional[List[int]] = None
     ) -> Optional[int]:
@@ -347,7 +364,7 @@ class Importer:
         """
         doc_id = self.find_document(tag_id, paper.filename)
         if doc_id is None:
-            path = os.path.join(self.mirror, f"Vol-{paper.volume}", paper.filename)
+            path = self.source_path(paper)
             data = {"title": paper.title, "tags": tag_id}
             if paper.created:
                 data["created"] = paper.created
@@ -395,8 +412,8 @@ class Importer:
         doc_ids = []
         for model_paper in proceedings.papers:
             paper = Paper.of_model(volume, model_paper, proceedings.pubDate)
-            if not os.path.isfile(os.path.join(self.mirror, f"Vol-{volume}", paper.filename)):
-                report.problem(f"{paper.ceur_id} {paper.filename} not in the mirror")
+            if self.source_path(paper) is None:
+                report.problem(f"{paper.ceur_id} {paper.filename} not in the mirror nor converted")
                 continue
             doc_id = self.import_paper(paper, tag_id, report, volume_tags)
             if doc_id is not None:

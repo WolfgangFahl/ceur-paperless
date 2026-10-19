@@ -67,9 +67,28 @@ class TestImporter(Basetest):
         self.assertEqual("https://ceur-ws.org/Vol-3889/paper1.pdf", values["pdf_url"])
         self.assertEqual("paper1", values["paper_id"])
         self.assertEqual("https://ceur-ws.org/Vol-3889/paper1/", values["landing_page"])
+        # no doi on the page, no doi field value
+        self.assertNotIn("doi", values)
         self.assertEqual("Front matter", preface.document_type)
         self.assertEqual("Paper", paper.document_type)
         self.assertEqual(["Wiem Baazouzi", "Marouen Kachroudi"], paper.author_names)
+
+    def test_doi(self) -> None:
+        """
+        test the doi field of a paper of an embedded volume page: the model paper carries the DOI
+        of the JSON-LD, the field holds it as a doi.org url, see ceur-paperless issue 2
+        """
+        html = """<html><body>
+<span class="CEURVOLNR">Vol-4298</span><span class="CEURPUBDATE">2026-10-19</span>
+<div class="CEURTOC"><ul>
+<li id="paper7"><a href="paper7.pdf"><span class="CEURTITLE">Smartphone RTK for C-ITS</span></a></li>
+</ul></div></body></html>"""
+        proceedings = VolumeHtml(html).proceedings().target
+        proceedings.papers[0].doi = "10.83095/ceurws_04298_paper7"
+        paper = Paper.of_model(4298, proceedings.papers[0], proceedings.pubDate)
+        self.assertEqual("10.83095/ceurws_04298_paper7", paper.doi)
+        self.assertEqual("https://doi.org/10.83095/ceurws_04298_paper7", paper.field_values()["doi"])
+        self.assertEqual("url", Importer.FIELDS["doi"])
 
     def test_url_encoded_filename(self) -> None:
         """

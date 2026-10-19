@@ -61,6 +61,8 @@ class Paper:
     authors: Optional[str] = None
     pages: Optional[str] = None
     pdf_url: Optional[str] = None
+    # the DOI of the paper as the JSON-LD of an embedded volume page carries it, see issue 2
+    doi: Optional[str] = None
     author_names: List[str] = field(default_factory=list)
 
     @property
@@ -129,6 +131,7 @@ class Paper:
             "pdf_url": self.pdf_url,
             "paper_id": self.paper_id,
             "landing_page": self.landing_page,
+            "doi": f"https://doi.org/{self.doi}" if self.doi else None,
         }
         return {key: value for key, value in values.items() if value is not None}
 
@@ -160,6 +163,7 @@ class Paper:
             authors=authors,
             pages=pages,
             pdf_url=paper.pdfUrl,
+            doi=paper.doi,
             author_names=author_names,
         )
         return model_paper
@@ -208,6 +212,8 @@ class Importer:
         # DOI relevant fields, see semantify issue 14
         "paper_id": "string",
         "landing_page": "url",
+        # the DOI as doi.org url, from the JSON-LD of an embedded volume page, see issue 2
+        "doi": "url",
     }
 
     def __init__(
